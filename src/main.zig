@@ -6,6 +6,11 @@ const RLPItem = union(enum) {
     List: []const RLPItem,
 };
 
+const RLPItemType = enum {
+    String,
+    List,
+};
+
 const RlpError = error{InvalidInputFormat};
 
 fn trimTrailingZeroes(bytes: []u8) []u8 {
@@ -71,13 +76,52 @@ fn encode_rlp(input: RLPItem) !std.ArrayList(u8) {
     return rlp_encoding;
 }
 
-fn decode_rlp(input: []u8) !std.ArrayList(RLPItem) {
-    var first_byte = input[0];
-    if (first_byte >= 0x00 and first_byte <= 0x7f) {
-        return std.ArrayList(RLPItem).init(std.testing.allocator, &[_]RLPItem{RLPItem{ .String = input[0..1] }});
+/// retrieve the type, the index from where the payload starts and the length of the payload
+fn decodeItemTypeAndLength(input: []u8) !struct { RLPItemType, usize, usize } {
+    const first_byte = input[0];
+    if (first_byte >= 0 and first_byte <= 0xbf) {
+        if (first_byte <= 0x7f) {
+            return struct { RLPItemType.String, 0, 1 };
+        } else if (first_byte <= 0xb7) {
+            return struct { RLPItemType.String, 1, (first_byte - 0x80) };
+        } else {
+            const len_bytes = input[1 .. first_byte - 0xb7];
+            const len = std.mem.fromBytes(usize, len_bytes);
+            return struct { RLPItemType.String, (1 + len_bytes.len), len };
+        }
     } else {
-        @panic("not implemented yet");
+        if (first_byte <= 0xf7) {
+            return struct { RLPItemType.List, 1, (first_byte - 0xc0) };
+        } else {
+            const len_bytes = input[1 .. first_byte - 0xf7];
+            const len = std.mem.fromBytes(usize, len_bytes);
+            return struct { RLPItemType.List, (1 + len_bytes.len), len };
+        }
     }
+}
+
+fn decode_rlp(input: []u8) !std.ArrayList(RLPItem) {
+    var rlp_decoding = std.ArrayList(RLPItem).init(std.testing.allocator);
+
+    var index: usize = 0;
+    while (index < input.len) {
+        const result = try decodeItemTypeAndLength(input[index..]);
+        const item_type = result[0];
+        const item_idx = result[1];
+        const item_length = result[2];
+
+        var item: RLPItem = undefined;
+        if (item_type == RLPItemType.String) {
+            item = RLPItem{ .String = input[index + item_idx .. index + item_idx + item_length] };
+        } else {
+            item = RLPItem{ .List = try decode_rlp(input[index + item_idx .. index + item_idx + item_length]) };
+        }
+
+        try rlp_decoding.append(item);
+        index += item_idx + item_length;
+    }
+
+    return rlp_decoding;
 }
 
 fn add(a: i32, b: i32) i32 {
